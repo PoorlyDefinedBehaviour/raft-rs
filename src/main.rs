@@ -1,6 +1,7 @@
 use dotenv::dotenv;
 
 mod raft;
+mod tests;
 
 fn main() {
   std::env::set_var(
