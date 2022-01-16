@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package raft.v1;
+
+message RequestVoteRequest {
+  // The candidate's term.
+  uint64 term = 1;
+  // The candidate requesting the vote.
+  uint64 candidate_id = 2;
+  // Index of candidate's last log entry.
+  uint64 last_log_index = 3;
+  // Term of candidate's last log entry.
+  uint64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+  // The current term, for candidate to updat itself.
+  uint64 term = 1;
+  // If the candidate received the vote.
+  bool vote_granted = 2;
+}
+
+service Raft {
+  // Invoked by candidates to start leader elections.
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
+}
