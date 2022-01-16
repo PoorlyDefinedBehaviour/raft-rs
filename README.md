@@ -70,7 +70,7 @@ reliable state machine.
 
 ## Typical properties of consensus algorithms
 
-**Safety**: They ensure that an incorrect result is never returned under all non-Byzantine conditions, including networks delays, partitions, and packet logg, duplication and reordering.
+**Safety**: They ensure that an incorrect result is never returned under all non-[Byzantine conditions](https://en.wikipedia.org/wiki/Byzantine_fault), including networks delays, partitions, and packet logg, duplication and reordering.
 
 **Availability**: They are fully functional as the majority of the servers are functional. For example, a cluster of five servers can tolerate the failure of two servers. Servers that failed may rejoin the cluster after recovering.
 
