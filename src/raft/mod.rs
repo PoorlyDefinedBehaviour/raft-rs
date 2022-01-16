@@ -1,6 +1,6 @@
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tonic::{Request, Response, Status};
-use tracing::instrument;
+use tracing::{info, instrument};
 
 // Include Rust files generated in build.rs
 tonic::include_proto!("raft.v1");
@@ -23,7 +23,7 @@ pub struct Raft {
   /// when entry was received by the leader.
   ///
   /// Note that the first index should be 1.
-  logs: Vec<Log>,
+  logs: RwLock<Vec<Log>>,
   /// # Volatile state on all servers
   ///
   /// Index of highest log entry known to be committed.
@@ -31,7 +31,7 @@ pub struct Raft {
   /// Initialized to 0.
   ///
   /// Increases monotonically.
-  committed_index: u64,
+  committed_index: Mutex<u64>,
   /// Index of highest log entry applied to state machine.
   ///
   /// Initialized to 0.
@@ -61,8 +61,8 @@ impl Raft {
     Self {
       current_term: 0,
       voted_for: Mutex::new(None),
-      logs: vec![],
-      committed_index: 0,
+      logs: RwLock::new(vec![]),
+      committed_index: Mutex::new(0),
       last_applied_index: 0,
       // TODO: next_index.len() should be qual to the amount of servers in the cluster.
       next_index: vec![],
@@ -73,6 +73,7 @@ impl Raft {
 
   /// Returns true if the server decides to vote
   /// for the candidate to be the new cluster leader.
+  #[instrument(skip_all)]
   async fn vote(&self, candidate: RequestVoteRequest) -> bool {
     // Candidate cannot become the cluster leader if its
     // current term is less than some other server.
@@ -88,15 +89,19 @@ impl Raft {
       return false;
     }
 
+    let logs = self.logs.read().await;
+
     // The candidate log must as up-to-date as the server's log, otherwise
     // it cannot become the cluster leader.
-    if (candidate.last_log_index as usize) < self.logs.len() {
-      return false;
+    if let Some(index) = candidate.last_log_index {
+      if (index as usize) < logs.len() - 1 {
+        return false;
+      }
     }
 
     // TODO: am i needed?
-    if let Some(entry) = self.logs.last() {
-      if entry.term != candidate.last_log_term {
+    if let (Some(entry), Some(candidate_last_log_term)) = (logs.last(), candidate.last_log_term) {
+      if entry.term != candidate_last_log_term {
         return false;
       }
     }
@@ -105,11 +110,78 @@ impl Raft {
 
     true
   }
+
+  /// Appends new entries to the server logs.
+  ///
+  /// To append new entries to the server logs:
+  ///
+  /// - The leader must map the server to a term thats greater or equal to the server current term.
+  /// - The server must contain an entry at `request.previous_log_index`
+  /// whose term matches `request.previous_log_term`.
+  #[instrument(skip_all)]
+  async fn append_entries(&self, mut request: AppendEntriesRequest) -> bool {
+    // If the term that the leader thinks this server has is not correct,
+    // the server does not accept the new log entries.
+    if request.term < self.current_term {
+      info!(
+        request.term,
+        self.current_term, "request denied: term is less than the current term",
+      );
+      return false;
+    }
+
+    let mut logs = self.logs.write().await;
+
+    info!(
+      previous_log_index = request.previous_log_index,
+      last_log_index = logs.len(),
+    );
+
+    if let Some(index) = request.previous_log_index {
+      let index = index as usize;
+
+      if index >= logs.len() {
+        info!("request denied: no log at index");
+
+        return false;
+      }
+
+      if let (Some(log), Some(term)) = (logs.get(index), request.previous_log_term) {
+        if log.term != term {
+          info!(
+            "
+              log at index has a diffent term than expected.
+              truncating logs that come after the request index.
+              "
+          );
+
+          logs.truncate(index);
+        }
+      }
+    }
+
+    info!(
+      number_of_entries = request.entries.len(),
+      "appending entries to the log"
+    );
+
+    logs.append(&mut request.entries);
+
+    let mut committed_index = self.committed_index.lock().await;
+
+    if request.leader_commit_index > *committed_index {
+      *committed_index = std::cmp::min(request.leader_commit_index, logs.len() as u64 - 1);
+    }
+
+    info!(committed_index = *committed_index, "new commited_index");
+
+    true
+  }
 }
 
 #[tonic::async_trait]
 impl raft_server::Raft for Raft {
-  #[instrument]
+  #[instrument(skip_all)]
   async fn request_vote(
     &self,
     request: Request<RequestVoteRequest>,
@@ -122,13 +194,17 @@ impl raft_server::Raft for Raft {
     }));
   }
 
-  #[instrument]
+  #[instrument(skip_all)]
   async fn append_entries(
     &self,
     request: Request<AppendEntriesRequest>,
   ) -> Result<Response<AppendEntriesResponse>, Status> {
     let request = request.into_inner();
-    panic!("TODO");
+
+    Ok(Response::new(AppendEntriesResponse {
+      term: self.current_term,
+      success: self.append_entries(request).await,
+    }))
   }
 }
 
@@ -150,8 +226,8 @@ mod tests {
       .request_vote(Request::new(RequestVoteRequest {
         term: 0,
         candidate_id: 1,
-        last_log_index: 0,
-        last_log_term: 0,
+        last_log_index: None,
+        last_log_term: None,
       }))
       .await
       .unwrap()
@@ -177,8 +253,8 @@ mod tests {
       .request_vote(Request::new(RequestVoteRequest {
         term: 0,
         candidate_id: 1,
-        last_log_index: 0,
-        last_log_term: 0,
+        last_log_index: None,
+        last_log_term: None,
       }))
       .await
       .unwrap()
@@ -204,8 +280,8 @@ mod tests {
       .request_vote(Request::new(RequestVoteRequest {
         term: 0,
         candidate_id: 1,
-        last_log_index: 0,
-        last_log_term: 0,
+        last_log_index: None,
+        last_log_term: None,
       }))
       .await
       .unwrap();
@@ -214,8 +290,8 @@ mod tests {
       .request_vote(Request::new(RequestVoteRequest {
         term: 0,
         candidate_id: 1,
-        last_log_index: 0,
-        last_log_term: 0,
+        last_log_index: None,
+        last_log_term: None,
       }))
       .await
       .unwrap()
@@ -224,6 +300,150 @@ mod tests {
     let expected = RequestVoteResponse {
       term: 0,
       vote_granted: false,
+    };
+
+    assert_eq!(expected, response);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn server_does_not_append_entries_if_request_term_is_less_than_the_current_term() {
+    let mut follower = Raft::new();
+
+    follower.current_term = 2;
+
+    let mut client = support::grpc::start_server(follower).await;
+
+    let response = client
+      .append_entries(Request::new(AppendEntriesRequest {
+        term: 1,
+        leader_id: 0,
+        previous_log_index: Some(0),
+        previous_log_term: Some(0),
+        entries: vec![],
+        leader_commit_index: 0,
+      }))
+      .await
+      .unwrap()
+      .into_inner();
+
+    let expected = AppendEntriesResponse {
+      term: 2,
+      success: false,
+    };
+
+    assert_eq!(expected, response);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn when_appending_entries_deletes_conflicting_entries_that_come_after_the_previous_log_index_sent_in_the_request(
+  ) {
+    let mut follower = Raft::new();
+
+    follower.current_term = 2;
+
+    {
+      let mut logs = follower.logs.write().await;
+      *logs = vec![
+        Log {
+          term: 0,
+          value: vec![],
+        },
+        Log {
+          term: 1,
+          value: vec![],
+        },
+        Log {
+          term: 2,
+          value: vec![],
+        },
+      ];
+    }
+
+    let mut client = support::grpc::start_server(follower).await;
+
+    let response = client
+      .append_entries(Request::new(AppendEntriesRequest {
+        term: 1,
+        leader_id: 0,
+        previous_log_index: Some(1),
+        previous_log_term: Some(0),
+        entries: vec![Log {
+          term: 1,
+          value: "hello world".as_bytes().to_vec(),
+        }],
+        leader_commit_index: 0,
+      }))
+      .await
+      .unwrap()
+      .into_inner();
+
+    let expected = vec![
+      Log {
+        term: 0,
+        value: vec![],
+      },
+      Log {
+        term: 1,
+        value: "hello world".as_bytes().to_vec(),
+      },
+    ];
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn server_does_not_append_entries_if_it_does_not_contain_an_entry_at_previous_log_index_sent_in_the_request(
+  ) {
+    let mut follower = Raft::new();
+
+    follower.current_term = 1;
+
+    let mut client = support::grpc::start_server(follower).await;
+
+    let response = client
+      .append_entries(Request::new(AppendEntriesRequest {
+        term: 1,
+        leader_id: 0,
+        previous_log_index: Some(0),
+        previous_log_term: Some(0),
+        entries: vec![],
+        leader_commit_index: 0,
+      }))
+      .await
+      .unwrap()
+      .into_inner();
+
+    let expected = AppendEntriesResponse {
+      term: 1,
+      success: false,
+    };
+
+    assert_eq!(expected, response);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn appends_new_entries_to_server_logs() {
+    let follower = Raft::new();
+
+    let mut client = support::grpc::start_server(follower).await;
+
+    let response = client
+      .append_entries(Request::new(AppendEntriesRequest {
+        term: 0,
+        leader_id: 0,
+        previous_log_index: None,
+        previous_log_term: None,
+        entries: vec![Log {
+          term: 0,
+          value: "hello world".as_bytes().to_vec(),
+        }],
+        leader_commit_index: 0,
+      }))
+      .await
+      .unwrap()
+      .into_inner();
+
+    let expected = AppendEntriesResponse {
+      term: 0,
+      success: true,
     };
 
     assert_eq!(expected, response);
