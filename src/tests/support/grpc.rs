@@ -6,7 +6,7 @@ use tonic::transport::{Channel, Server};
 use crate::raft;
 use crate::raft::Raft;
 
-/// Starts the grpc server in a random port and a client that will make requests to it.
+/// Starts the grpc server in a random port and returns a client that will make requests to it.
 ///
 /// This function is useful for tests that need the server to be running.
 ///
