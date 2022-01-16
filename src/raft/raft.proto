@@ -25,7 +25,33 @@ message RequestVoteResponse {
   bool vote_granted = 2;
 }
 
+message AppendEntriesRequest {
+  // The cluster leader term.
+  uint64 term = 1;
+  // The cluster leader id.
+  uint64 leader_id = 2;
+  // Index of log entry immediately preceding new ones.
+  uint64 previous_log_index = 3;
+  // Term of log entry immediately preceding new ones.
+  uint64 previous_term_index = 4;
+  // Log entries to store.
+  //
+  // Will be empty when AppendEntries is used for heartbeats.
+  repeated Log entries = 5;
+  // The cluster leader commit index (index of highest log entry known to be committed).
+  uint64 leader_commit_index = 6;
+}
+
+message AppendEntriesResponse {
+  // The current term of the follower, for leader to update itself.
+  uint64 term = 1;
+  // True if follower contained entry matching previous_log_index and previous_log_term.
+  bool success = 2;
+}
+
 service Raft {
   // Invoked by candidates to start leader elections.
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
+  // Invoke by the cluster leader to append new log entries to a follower.
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse) {}
 }

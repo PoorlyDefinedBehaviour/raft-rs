@@ -36,6 +36,7 @@ pub struct Raft {
   ///
   /// Increases monotonically.
   last_applied: u64,
+  // TODO: use type state
   /// # Volatile state on leaders
   ///
   /// For each server, index of the next log entry
@@ -53,7 +54,7 @@ pub struct Raft {
 
 impl Raft {
   pub fn new() -> Self {
-    Self {}
+    todo!()
   }
 }
 
@@ -63,6 +64,14 @@ impl raft_server::Raft for Raft {
     &self,
     request: Request<RequestVoteRequest>,
   ) -> Result<Response<RequestVoteResponse>, Status> {
+    let request = request.into_inner();
+    panic!("TODO");
+  }
+
+  async fn append_entries(
+    &self,
+    request: Request<AppendEntriesRequest>,
+  ) -> Result<Response<AppendEntriesResponse>, Status> {
     let request = request.into_inner();
     panic!("TODO");
   }

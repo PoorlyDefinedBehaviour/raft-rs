@@ -13,4 +13,5 @@ fn main() {
   tracing_subscriber::fmt::init();
 
   dbg!(raft::RequestVoteRequest::default());
+  dbg!(raft::AppendEntriesRequest::default());
 }
