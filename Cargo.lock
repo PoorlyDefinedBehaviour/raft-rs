@@ -640,6 +640,7 @@ dependencies = [
  "anyhow",
  "dotenv",
  "prost",
+ "rand",
  "test-log",
  "thiserror",
  "tokio",
