@@ -209,18 +209,18 @@ impl raft_server::Raft for Raft {
 }
 
 #[cfg(test)]
-mod tests {
+mod integration_tests {
   use crate::tests::support;
 
   use super::*;
 
   #[test_log::test(tokio::test)]
   async fn server_does_not_grant_vote_if_candidates_term_is_less_than_the_current_term() {
-    let mut raft = Raft::new();
+    let mut follower = Raft::new();
 
-    raft.current_term = 1;
+    follower.current_term = 1;
 
-    let mut client = support::grpc::start_server(raft).await;
+    let mut client = support::grpc::start_server(follower).await;
 
     let response = client
       .request_vote(Request::new(RequestVoteRequest {
@@ -243,11 +243,11 @@ mod tests {
 
   #[test_log::test(tokio::test)]
   async fn server_grants_vote_if_has_not_voted_yet() {
-    let mut raft = Raft::new();
+    let mut follower = Raft::new();
 
-    raft.current_term = 0;
+    follower.current_term = 0;
 
-    let mut client = support::grpc::start_server(raft).await;
+    let mut client = support::grpc::start_server(follower).await;
 
     let response = client
       .request_vote(Request::new(RequestVoteRequest {
@@ -270,11 +270,11 @@ mod tests {
 
   #[test_log::test(tokio::test)]
   async fn server_does_not_grant_vote_if_it_has_already_voted_for_another_candidate() {
-    let mut raft = Raft::new();
+    let mut follower = Raft::new();
 
-    raft.current_term = 0;
+    follower.current_term = 0;
 
-    let mut client = support::grpc::start_server(raft).await;
+    let mut client = support::grpc::start_server(follower).await;
 
     let _ = client
       .request_vote(Request::new(RequestVoteRequest {
