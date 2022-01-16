@@ -1,3 +1,4 @@
+use rand::Rng;
 use tokio::sync::{Mutex, RwLock};
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
@@ -26,6 +27,9 @@ pub struct Raft {
   logs: RwLock<Vec<Log>>,
   /// # Volatile state on all servers
   ///
+  /// A unique number that identifies this node.
+  // TODO: does this need to increase monotonically?
+  node_id: u64,
   /// Index of highest log entry known to be committed.
   ///
   /// Initialized to 0.
@@ -59,6 +63,8 @@ impl Raft {
   pub fn new() -> Self {
     // TODO: handle boot from state persisted to persitent storage.
     Self {
+      // TODO: is it ok for the node id to be random?
+      node_id: rand::thread_rng().gen(),
       current_term: 0,
       voted_for: Mutex::new(None),
       logs: RwLock::new(vec![]),
@@ -209,6 +215,157 @@ impl raft_server::Raft for Raft {
 }
 
 #[cfg(test)]
+mod unit_tests {
+  use super::*;
+
+  #[test_log::test(tokio::test)]
+  async fn does_not_append_entries_if_leader_term_is_less_than_the_follower_current_term() {
+    let leader = Raft::new();
+
+    let mut follower = Raft::new();
+
+    follower.current_term = 1;
+
+    let success = follower
+      .append_entries(AppendEntriesRequest {
+        term: 0,
+        leader_id: leader.node_id,
+        previous_log_index: None,
+        previous_log_term: None,
+        entries: vec![],
+        leader_commit_index: 0,
+      })
+      .await;
+
+    assert_eq!(false, success);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn does_not_append_entries_if_log_does_not_contain_an_entry_at_previous_log_index_sent_in_the_request(
+  ) {
+    let leader = Raft::new();
+
+    let mut follower = Raft::new();
+
+    follower.current_term = 1;
+
+    let success = follower
+      .append_entries(AppendEntriesRequest {
+        term: 0,
+        leader_id: leader.node_id,
+        previous_log_index: Some(0),
+        previous_log_term: Some(0),
+        entries: vec![],
+        leader_commit_index: 0,
+      })
+      .await;
+
+    assert_eq!(false, success);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn while_appending_entries_deletes_conflicting_entries() {
+    let leader = Raft::new();
+
+    let mut follower = Raft::new();
+
+    let _ = follower
+      .append_entries(AppendEntriesRequest {
+        term: 0,
+        leader_id: leader.node_id,
+        previous_log_index: None,
+        previous_log_term: None,
+        entries: vec![
+          Log {
+            term: 0,
+            value: "a".as_bytes().to_vec(),
+          },
+          Log {
+            term: 1,
+            value: "b".as_bytes().to_vec(),
+          },
+          Log {
+            term: 1,
+            value: "c".as_bytes().to_vec(),
+          },
+        ],
+        leader_commit_index: 0,
+      })
+      .await;
+
+    follower.current_term = 2;
+
+    let _ = follower
+      .append_entries(AppendEntriesRequest {
+        term: 2,
+        leader_id: leader.node_id,
+        previous_log_index: Some(1),
+        previous_log_term: Some(2),
+        entries: vec![Log {
+          term: 2,
+          value: "d".as_bytes().to_vec(),
+        }],
+        leader_commit_index: 0,
+      })
+      .await;
+
+    let expected = vec![
+      Log {
+        term: 0,
+        value: "a".as_bytes().to_vec(),
+      },
+      Log {
+        term: 2,
+        value: "d".as_bytes().to_vec(),
+      },
+    ];
+
+    assert_eq!(expected, follower.logs.into_inner());
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn append_entries_returns_true_when_entries_are_appended() {
+    let leader = Raft::new();
+
+    let follower = Raft::new();
+
+    assert_eq!(
+      true,
+      follower
+        .append_entries(AppendEntriesRequest {
+          term: 0,
+          leader_id: leader.node_id,
+          previous_log_index: None,
+          previous_log_term: None,
+          entries: vec![Log {
+            term: 0,
+            value: "a".as_bytes().to_vec()
+          }],
+          leader_commit_index: 0,
+        })
+        .await
+    );
+
+    assert_eq!(
+      true,
+      follower
+        .append_entries(AppendEntriesRequest {
+          term: 0,
+          leader_id: leader.node_id,
+          previous_log_index: None,
+          previous_log_term: None,
+          entries: vec![Log {
+            term: 0,
+            value: "b".as_bytes().to_vec()
+          }],
+          leader_commit_index: 0,
+        })
+        .await
+    );
+  }
+}
+
+#[cfg(test)]
 mod integration_tests {
   use crate::tests::support;
 
@@ -332,61 +489,6 @@ mod integration_tests {
     };
 
     assert_eq!(expected, response);
-  }
-
-  #[test_log::test(tokio::test)]
-  async fn when_appending_entries_deletes_conflicting_entries_that_come_after_the_previous_log_index_sent_in_the_request(
-  ) {
-    let mut follower = Raft::new();
-
-    follower.current_term = 2;
-
-    {
-      let mut logs = follower.logs.write().await;
-      *logs = vec![
-        Log {
-          term: 0,
-          value: vec![],
-        },
-        Log {
-          term: 1,
-          value: vec![],
-        },
-        Log {
-          term: 2,
-          value: vec![],
-        },
-      ];
-    }
-
-    let mut client = support::grpc::start_server(follower).await;
-
-    let response = client
-      .append_entries(Request::new(AppendEntriesRequest {
-        term: 1,
-        leader_id: 0,
-        previous_log_index: Some(1),
-        previous_log_term: Some(0),
-        entries: vec![Log {
-          term: 1,
-          value: "hello world".as_bytes().to_vec(),
-        }],
-        leader_commit_index: 0,
-      }))
-      .await
-      .unwrap()
-      .into_inner();
-
-    let expected = vec![
-      Log {
-        term: 0,
-        value: vec![],
-      },
-      Log {
-        term: 1,
-        value: "hello world".as_bytes().to_vec(),
-      },
-    ];
   }
 
   #[test_log::test(tokio::test)]
