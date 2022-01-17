@@ -21,7 +21,7 @@ pub struct Raft {
   /// `voted_for` is None if the server has not voted for a candidate.
   voted_for: Mutex<Option<u64>>,
   /// Each entry contains a command for state machine and the term
-  /// when entry was received by the leader.
+  /// when the entry was received by the leader.
   ///
   /// Note that the first index should be 1.
   logs: RwLock<Vec<Log>>,
@@ -226,6 +226,77 @@ impl raft_server::Raft for Raft {
 #[cfg(test)]
 mod unit_tests {
   use super::*;
+
+  #[test_log::test(tokio::test)]
+  async fn follower_does_not_vote_for_candidate_if_candidates_term_is_less_than_the_follower_current_term(
+  ) {
+    let mut candidate = Raft::new();
+
+    candidate.current_term = 0;
+
+    let mut follower = Raft::new();
+
+    follower.current_term = 1;
+
+    let vote_granted = follower
+      .vote(RequestVoteRequest {
+        term: candidate.current_term,
+        candidate_id: candidate.node_id,
+        last_log_index: None, // Because candidate has no logs.
+        last_log_term: None,  // Because candi has no logs.
+      })
+      .await;
+
+    assert_eq!(false, vote_granted);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn follower_does_not_for_candidate_if_it_has_already_voted_for_another_candidate() {
+    let candidate_1 = Raft::new();
+
+    let candidate_2 = Raft::new();
+
+    let follower = Raft::new();
+
+    let vote_granted_to_candidate_1 = follower
+      .vote(RequestVoteRequest {
+        term: candidate_1.current_term,
+        candidate_id: candidate_1.node_id,
+        last_log_index: None, // Because candidate has no logs.
+        last_log_term: None,  // Because candi has no logs.
+      })
+      .await;
+
+    let vote_granted_to_candidate_2 = follower
+      .vote(RequestVoteRequest {
+        term: candidate_2.current_term,
+        candidate_id: candidate_2.node_id,
+        last_log_index: None, // Because candidate has no logs.
+        last_log_term: None,  // Because candi has no logs.
+      })
+      .await;
+
+    assert_eq!(true, vote_granted_to_candidate_1);
+    assert_eq!(false, vote_granted_to_candidate_2);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn follower_votes_for_candidate() {
+    let candidate = Raft::new();
+
+    let follower = Raft::new();
+
+    let vote_granted = follower
+      .vote(RequestVoteRequest {
+        term: candidate.current_term,
+        candidate_id: candidate.node_id,
+        last_log_index: None, // Because candidate has no logs.
+        last_log_term: None,  // Because candi has no logs.
+      })
+      .await;
+
+    assert_eq!(true, vote_granted);
+  }
 
   #[test_log::test(tokio::test)]
   async fn does_not_append_entries_if_leader_term_is_less_than_the_follower_current_term() {
