@@ -124,6 +124,10 @@ impl Raft {
   /// - The leader must map the server to a term thats greater or equal to the server current term.
   /// - The server must contain an entry at `request.previous_log_index`
   /// whose term matches `request.previous_log_term`.
+  ///
+  /// Conflicting entries are deleted from the server log.
+  /// An entry is considered to be conflicting with another entry
+  /// if it has the same index as a new entry but a different term.
   #[instrument(skip_all)]
   async fn append_entries(&self, mut request: AppendEntriesRequest) -> bool {
     // If the term that the leader thinks this server has is not correct,
@@ -176,7 +180,12 @@ impl Raft {
     let mut committed_index = self.committed_index.lock().await;
 
     if request.leader_commit_index > *committed_index {
-      *committed_index = std::cmp::min(request.leader_commit_index, logs.len() as u64 - 1);
+      info!(
+        request.leader_commit_index,
+        last_log_index = logs.len(),
+        "leader commit index if greater than the server commit index. updating it."
+      );
+      *committed_index = std::cmp::min(request.leader_commit_index, logs.len() as u64);
     }
 
     info!(committed_index = *committed_index, "new commited_index");
@@ -362,6 +371,54 @@ mod unit_tests {
         })
         .await
     );
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn after_appending_new_entries_the_server_committed_index_is_updated() {
+    let leader = Raft::new();
+
+    *leader.committed_index.lock().await = 1;
+
+    let follower = Raft::new();
+
+    let _ = follower
+      .append_entries(AppendEntriesRequest {
+        term: 1,
+        leader_id: leader.node_id,
+        previous_log_index: None,
+        previous_log_term: None,
+        entries: vec![Log {
+          term: 1,
+          value: "hello world 1".as_bytes().to_vec(),
+        }],
+        leader_commit_index: *leader.committed_index.lock().await,
+      })
+      .await;
+
+    // The follower commit index becomes the server commit index
+    // because min(leader commit index, follower.logs.lock().await.len()) = 1.
+    assert_eq!(1, *follower.committed_index.lock().await);
+
+    *leader.committed_index.lock().await = 3;
+
+    let _ = follower
+      .append_entries(AppendEntriesRequest {
+        term: 3,
+        leader_id: leader.node_id,
+        previous_log_index: None,
+        previous_log_term: None,
+        entries: vec![Log {
+          term: 3,
+          value: "hello world 2".as_bytes().to_vec(),
+        }],
+        leader_commit_index: *leader.committed_index.lock().await,
+      })
+      .await;
+
+    // The follower commit index becomes the server commit index
+    // because min(leader commit index, follower.logs.lock().await.len()) = 2.
+    // The leader commit index is 3 but the follower logs has 2 entries.
+    assert_eq!(2, *follower.committed_index.lock().await);
   }
 }
 
