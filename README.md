@@ -43,9 +43,9 @@ This simplifies the management of the replicated log.
 
 ## Raft in the wild
 
-https://github.com/tikv/raft-rs
-https://github.com/hashicorp/raft
-https://github.com/sofastack/sofa-jraft
+https://github.com/tikv/raft-rs  
+https://github.com/hashicorp/raft  
+https://github.com/sofastack/sofa-jraft  
 https://github.com/eBay/NuRaft
 
 # Replicated state machines
@@ -80,7 +80,7 @@ reliable state machine.
 
 ## Examples of replicated state machines
 
-https://www.cs.cornell.edu/courses/cs6464/2009sp/lectures/16-chubby.pdf
+https://www.cs.cornell.edu/courses/cs6464/2009sp/lectures/16-chubby.pdf  
 https://github.com/apache/zookeeper
 
 # Paxos
