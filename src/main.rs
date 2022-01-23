@@ -1,6 +1,7 @@
 use dotenv::dotenv;
 
 mod raft;
+#[cfg(test)]
 mod tests;
 
 fn main() {

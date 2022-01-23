@@ -216,10 +216,10 @@ impl Raft {
       term: *current_term,
     });
 
-    return RequestVoteResponse {
+    RequestVoteResponse {
       term: *current_term,
       vote_granted: true,
-    };
+    }
   }
 
   /// Appends new entries to the server logs.
