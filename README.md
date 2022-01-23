@@ -340,3 +340,4 @@ A leader must check whether it has been deposed before processing a read-only re
 In Search of an Understandable Consensus Algorithm
 (Extended Version) - https://raft.github.io/raft.pdf  
 Designing for Understandability: The Raft Consensus Algorithm - https://www.youtube.com/watch?v=vYp4LYbnnW8
+https://github.com/hashicorp/raft
