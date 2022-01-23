@@ -324,6 +324,21 @@ impl Raft {
       success: true,
     }
   }
+
+  pub async fn install_snapshot(&self, request: InstallSnapshotRequest) -> InstallSnapshotResponse {
+    let current_term = self.current_term.read().await;
+
+    if request.leader_term < *current_term {
+      info!("request term is less than the current term");
+      return InstallSnapshotResponse {
+        term: *current_term,
+      };
+    }
+
+    InstallSnapshotResponse {
+      term: *current_term,
+    }
+  }
 }
 
 #[tonic::async_trait]
@@ -344,6 +359,15 @@ impl raft_server::Raft for Raft {
     let request = request.into_inner();
 
     Ok(Response::new(self.append_entries(request).await))
+  }
+
+  async fn install_snapshot(
+    &self,
+    request: Request<InstallSnapshotRequest>,
+  ) -> Result<Response<InstallSnapshotResponse>, Status> {
+    let request = request.into_inner();
+
+    Ok(Response::new(self.install_snapshot(request).await))
   }
 }
 
@@ -703,6 +727,36 @@ mod unit_tests {
     // because min(leader commit index, follower.logs.lock().await.len()) = 2.
     // The leader commit index is 3 but the follower logs has 2 entries.
     assert_eq!(2, *follower.committed_index.lock().await);
+  }
+
+  #[test_log::test(tokio::test)]
+  async fn does_not_install_snapshot_if_leader_term_is_less_than_the_current_term() {
+    let leader = Raft::new();
+
+    *leader.current_term.write().await = 0;
+
+    let follower = Raft::new();
+
+    *follower.current_term.write().await = 1;
+
+    let response = follower
+      .install_snapshot(InstallSnapshotRequest {
+        leader_term: *leader.current_term.read().await,
+        leader_id: leader.node_id,
+        last_included_index: 0,
+        last_included_term: 0,
+        offset: 0,
+        data: vec![],
+        done: true,
+      })
+      .await;
+
+    assert_eq!(
+      InstallSnapshotResponse {
+        term: *follower.current_term.write().await
+      },
+      response
+    );
   }
 }
 
