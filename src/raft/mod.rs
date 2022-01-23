@@ -243,7 +243,7 @@ mod unit_tests {
         term: candidate.current_term,
         candidate_id: candidate.node_id,
         last_log_index: None, // Because candidate has no logs.
-        last_log_term: None,  // Because candi has no logs.
+        last_log_term: None,  // Because candidate has no logs.
       })
       .await;
 
@@ -251,7 +251,7 @@ mod unit_tests {
   }
 
   #[test_log::test(tokio::test)]
-  async fn follower_does_not_for_candidate_if_it_has_already_voted_for_another_candidate() {
+  async fn follower_does_not_vote_for_candidate_if_it_has_already_voted_for_another_candidate() {
     let candidate_1 = Raft::new();
 
     let candidate_2 = Raft::new();
@@ -263,7 +263,7 @@ mod unit_tests {
         term: candidate_1.current_term,
         candidate_id: candidate_1.node_id,
         last_log_index: None, // Because candidate has no logs.
-        last_log_term: None,  // Because candi has no logs.
+        last_log_term: None,  // Because candidate has no logs.
       })
       .await;
 
@@ -272,7 +272,7 @@ mod unit_tests {
         term: candidate_2.current_term,
         candidate_id: candidate_2.node_id,
         last_log_index: None, // Because candidate has no logs.
-        last_log_term: None,  // Because candi has no logs.
+        last_log_term: None,  // Because candidate has no logs.
       })
       .await;
 
@@ -291,7 +291,7 @@ mod unit_tests {
         term: candidate.current_term,
         candidate_id: candidate.node_id,
         last_log_index: None, // Because candidate has no logs.
-        last_log_term: None,  // Because candi has no logs.
+        last_log_term: None,  // Because candidate has no logs.
       })
       .await;
 
