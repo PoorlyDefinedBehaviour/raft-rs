@@ -1,4 +1,4 @@
-# What is Raft
+# **R**eplicated **A**nd **F**ault **T**olerant
 
 Raft is a consensus algorithm for managing a replicated log.
 
@@ -334,3 +334,9 @@ To avoid this situation:
 A leader must have the latest information on which entries are committed. Because of that, each leader commits a blank _no-op_ entry into the log at the start of its term.
 
 A leader must check whether it has been deposed before processing a read-only request. Raft handles this by having the leader exchange heartbeat messages with a majority of the cluster before responding to read-only request.
+
+# References
+
+In Search of an Understandable Consensus Algorithm
+(Extended Version) - https://raft.github.io/raft.pdf  
+Designing for Understandability: The Raft Consensus Algorithm - https://www.youtube.com/watch?v=vYp4LYbnnW8
