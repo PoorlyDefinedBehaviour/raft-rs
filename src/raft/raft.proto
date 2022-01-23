@@ -42,6 +42,28 @@ message AppendEntriesRequest {
   repeated Log entries = 5;
 }
 
+message InstallSnapshotRequest {
+  // The cluster leader term.
+  uint64 leader_term = 1;
+  // The cluster leader id.
+  uint64 leader_id = 2;
+  // The snapshot replaces all entries up through and including this index. 
+  uint64 last_included_index = 3;
+  // The term of the log entry at last_included_index.
+  uint64 last_included_term = 4;
+  // Byte offset where chunk is positioned in the snapshot file. 
+  uint64 offset = 5;
+  // Raw bytes of the snapshot chunk, starting at offset. 
+  bytes data = 6;
+  // True if this is the last chunk.
+  bool done = 7;
+}
+
+message InstallSnapshotResponse {
+  // Current term of the follower, for leader to update itself.
+  uint64 term = 1;
+}
+
 message AppendEntriesResponse {
   // The current term of the follower, for leader to update itself.
   uint64 term = 1;
@@ -54,4 +76,6 @@ service Raft {
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
   // Invoke by the cluster leader to append new log entries to a follower.
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse) {}
+  // Invoked by the cluster leader to send chunks of a snapshot to a follower.
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse) {}
 }
