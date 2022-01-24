@@ -54,23 +54,23 @@ States machines on a collection of servers compute identical copies of the same
 state and can continue operating even if some of the servers are down.
 Replicated state machines are used to solve a variety of fault tolerance problems in distributed systems.
 
-## How the consensus algorithms works with replicated state machines
+## How the consensus algorithms work with replicated state machines
 
 Replicated state machines are typically implemented using a replicated log.
 
 The consensus algorithm manages a replicated log containg state machine
 commands from clients. The state machines process identical sequences of commands
-fro mthe logs, so they produce the same outputs.
+fro the logs, so they produce the same outputs.
 
 The consensus algorithm module on the server receives commands from clients
 and adds them to its log. It communicates with the consensus algorithm modules on other servers to ensure that every log eventually contains the commands in the same order even if some of the servers fail.
 
-Once commands are properly replicated (every server has the same commands in the samer order), each server's state machine processes them and the outputs are returned to the clients. As a result, the servers appear to form a single, highly
+Once commands are properly replicated (every server has the same commands in the same order), each server's state machine processes them and the outputs are returned to the clients. As a result, the servers appear to form a single, highly
 reliable state machine.
 
 ## Typical properties of consensus algorithms
 
-**Safety**: They ensure that an incorrect result is never returned under all non-[Byzantine conditions](https://en.wikipedia.org/wiki/Byzantine_fault), including networks delays, partitions, and packet logg, duplication and reordering.
+**Safety**: They ensure that an incorrect result is never returned under all non-[Byzantine conditions](https://en.wikipedia.org/wiki/Byzantine_fault), including networks delays, partitions, and packet lost, duplication and reordering.
 
 **Availability**: They are fully functional as the majority of the servers are functional. For example, a cluster of five servers can tolerate the failure of two servers. Servers that failed may rejoin the cluster after recovering.
 
@@ -122,7 +122,7 @@ A raft cluster contains several servers, five is a typical number, which allows 
 
 **follower**: Followers simply respond to requests from leaders and candidates, if a client contacts a follower, the request is redirected to the leader.
 
-**candidate**: Candidate is used to elect a new leader.
+**candidate**: A candidate is a follower that wants to become a leader.
 
 Raft divides time into _terms_ of arbitraty length numbered with consecutive integers. Each term begins with an _election_, in which one or more candidates attempt to become leader. If a candidate wins the election, then it serves as leader for the rest of the term. If the election results in a split vote, the term ends with no leader and a new term with a new election begins shortly.
 
@@ -146,13 +146,13 @@ To begin an election, a follower increments its current term and transitions to 
 
 **Wins election**: The candidate wins the election and becomes the new leader.
 
-A candidate wins an election if it receives from a majority of the servers in the full cluster for the same term. Each server votes for at most one candidate in a given term, on a first-come-first-served basis.
+A candidate wins an election if it receives votes from a majority of the servers in the full cluster for the same term. Each server votes for at most one candidate in a given term, on a first-come-first-served basis.
 Once a candidate wins an election, it becomes the leader and sends heartbeat messages to all of the other servers to establish its authority and prevent new elections.
 
 **Other server wins election**: Another candidate wins the election and becomes the new leader.
 
-During an election, a candidate may receive an **AppendEntries** RPC from another server claiming to be the leader. If the leader's term is at least as large as the candidate's current term, then the candidate recognizes the leader as legitimiate and returns to follower state.
-If the request term is smaller than the candidate's curren term, the request is rejected as described in [Raft basics](#Raft-basics).
+During an election, a candidate may receive an **AppendEntries** RPC from another server claiming to be the leader. If the leader's term is at least as large as the candidate's current term, then the candidate recognizes the leader as legitimate and returns to follower state.
+If the request term is smaller than the candidate's current term, the request is rejected as described in [Raft basics](#Raft-basics).
 
 **Election timeout**: A period of time goes by with no winner.
 
@@ -160,7 +160,7 @@ If many followers become candidates at the same time, votes could be split so th
 
 Elections timeouts are chosen randomly from the range like 150..300ms to ensure that split votes are rare and that hey are resolved quickly.
 
-Each candidate gets a randomized election timeout at the start of an election, and it waits for the timeout to elpase before starting the next section.
+Each candidate gets a randomized election timeout at the start of an election, and it waits for the timeout to elapse before starting a new election.
 
 ## Election restriction
 
@@ -168,7 +168,7 @@ Raft uses the voting process to prevent a candidate from winning an election unl
 
 ## Log replication
 
-Once a loader, has been elected, it begins servicing client requests that each contain a command to be executed by the replicated state machines. When a request is received, the leader appends the command to its log as a new entry, then issues **AppendEntries** RPCs in parallel to each of the servers to replicate the entry. Only after the entry has been replicated, the leader applies the entry to its state machine and returns the result of that execution to the client. The leader **retries** **AppendEntries** RPCs until all followers eventually store all log entries.
+Once a leader has been elected, it begins servicing client requests that each contain a command to be executed by the replicated state machines. When a request is received, the leader appends the command to its log as a new entry, then issues **AppendEntries** RPCs in parallel to each of the servers to replicate the entry. Only after the entry has been replicated, the leader applies the entry to its state machine and returns the result of that execution to the client. The leader **retries** **AppendEntries** RPCs until all followers eventually store all log entries.
 
 Logs are composed of sequentially numbered entries. Each entry contains the term in which it was created and a command for the state machine. The leader decides when it is safe to apply a log entry to the state machines, entries that have been applied to the state machines are called _committed_. Raft guarantees that committed entries are durable and will eventually be executed by all of the available state machines. A log entry is commited once the leader that created the entry has replicated it on a majority of the servers. The leader keeps track of the highest index it knows to be committed, and it includes that index in future **AppendEntries** RPCs so that other server eventually find out. Once a follower learns that a log entry is committed, it applies every entry up to the entry to its local state machine.
 
