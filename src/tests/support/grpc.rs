@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
@@ -14,7 +15,7 @@ use crate::raft::Raft;
 /// the raft node is in a specific state. If you need to do that,
 /// create a new Raft instance in the test, modify it and then pass it to
 /// `start_server`.
-pub async fn start_server(raft: Raft) -> raft::raft_client::RaftClient<Channel> {
+pub async fn start_server(raft: Arc<Raft>) -> raft::raft_client::RaftClient<Channel> {
   let svc = raft::raft_server::RaftServer::new(raft);
 
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
