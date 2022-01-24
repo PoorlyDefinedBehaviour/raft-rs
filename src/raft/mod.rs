@@ -325,15 +325,42 @@ impl Raft {
     }
   }
 
+  /// Updates follower logs based on a snapshot from the cluster leader.
   pub async fn install_snapshot(&self, request: InstallSnapshotRequest) -> InstallSnapshotResponse {
-    let current_term = self.current_term.read().await;
+    let mut current_term = self.current_term.write().await;
 
+    // Reply immediately with the current term
+    // if the leader term is less than the current term.
+    // The leader will use the term we return to update itself.
     if request.leader_term < *current_term {
-      info!("request term is less than the current term");
+      info!(
+        request_term = request.leader_term,
+        current_term = *current_term,
+        "request term is less than the current term"
+      );
       return InstallSnapshotResponse {
         term: *current_term,
       };
     }
+
+    let mut state = self.state.write().await;
+
+    // If our term is out of date, update it and transition
+    // into the follower state.
+    if request.leader_term > *current_term {
+      info!(
+        self.node_id,
+        current_term = *current_term,
+        request.leader_id,
+        request.leader_term,
+        "leader has a newer term, transitioning to follower and updating current term"
+      );
+
+      *state = State::Follower;
+      *current_term = request.leader_term;
+    }
+
+    // TODO: save current leader
 
     InstallSnapshotResponse {
       term: *current_term,
