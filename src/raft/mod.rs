@@ -6,7 +6,7 @@ use tokio::{
   sync::{Mutex, RwLock},
 };
 use tonic::{Request, Response, Status};
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 // Include Rust files generated in build.rs
 tonic::include_proto!("raft.v1");
@@ -14,21 +14,28 @@ tonic::include_proto!("raft.v1");
 /// The Raft server config.
 #[derive(Debug)]
 pub struct Config {
-  /// The amount of time a follower will wait without
+  /// The minimum amount of time a follower will wait without
   /// receiving a heartbeat from the leader before
   /// becoming a candidate and starting an election.
-  heartbeat_timeout: Duration,
-  /// The amount of time a candidate will wait for an election
+  /// The actual heartbeat timeout will be a random number between
+  /// `min_heartbeat_timeout` and `min_heartbeat_timeout` * 2.
+  min_heartbeat_timeout: Duration,
+  /// The minimum amount of time a candidate will wait for an election
   /// to end and for a new leader to be elected before restarting
   /// the election.
-  election_timeout: Duration,
+  /// The actual election timeout will be a random number between
+  /// `min_election_timeout` and `min_election_timeout` * 2.
+  min_election_timeout: Duration,
+  /// The list of the addresses of the servers in the cluster.
+  servers: Vec<String>,
 }
 
 impl Default for Config {
   fn default() -> Self {
     Self {
-      heartbeat_timeout: Duration::from_millis(250),
-      election_timeout: Duration::from_millis(rand::thread_rng().gen_range(150..=300)),
+      min_heartbeat_timeout: Duration::from_millis(250),
+      min_election_timeout: Duration::from_millis(rand::thread_rng().gen_range(150..=300)),
+      servers: Vec::new(),
     }
   }
 }
@@ -164,36 +171,156 @@ impl Raft {
     raft
   }
 
+  /// The Raft state machine.
+  ///
+  /// It delegates to sub state machines depending
+  /// on the current state.
+  #[instrument(skip_all)]
   async fn run(self: Arc<Self>) {
-    info!(self.node_id, "starting main loop");
-
-    let mut request_rx = self.request_rx.lock().await;
+    info!(self.node_id, "starting Raft state machine");
 
     loop {
-      select! {
-        Some(message) = request_rx.recv()=> {
-          match message {
-            Message::AppendEntries{ request, response_tx } => {
-              info!("got AppendEntries request");
-              let response = self.append_entries(request).await;
-              let _ = response_tx.send(response).unwrap();
-            },
-            Message::RequestVote{ request,response_tx } => {
-              let response = self.vote(request).await;
-              let _ = response_tx.send(response).unwrap();
-            }
-            Message::InstallSnapshot { request, response_tx } => {
-              let response = self.install_snapshot(request).await;
-              let _ = response_tx.send(response).unwrap();
-            }
-          }
-        }
-        // Heartbeat timeout.
-        _ = tokio::time::sleep(self.config.heartbeat_timeout) => {
-          info!(self.node_id, "heartbeat timed out");
-        }
+      match *self.state.read().await {
+        State::Follower => self.run_follower().await,
+        State::Candidate => self.run_candidate().await,
+        State::Leader => self.run_leader().await,
       }
     }
+  }
+
+  /// The follower state machine.
+  async fn run_follower(&self) {}
+
+  /// The candidate state machine.
+  async fn run_candidate(&self) {}
+
+  /// The leader state machine.
+  async fn run_leader(&self) {
+    let mut request_rx = self.request_rx.lock().await;
+
+    select! {
+      Some(message) = request_rx.recv()=> {
+        match message {
+          Message::AppendEntries{ request, response_tx } => {
+            info!("got AppendEntries request");
+            let response = self.append_entries(request).await;
+            let _ = response_tx.send(response).unwrap();
+          },
+          Message::RequestVote{ request,response_tx } => {
+            let response = self.vote(request).await;
+            let _ = response_tx.send(response).unwrap();
+          }
+          Message::InstallSnapshot { request, response_tx } => {
+            let response = self.install_snapshot(request).await;
+            let _ = response_tx.send(response).unwrap();
+          }
+        }
+      }
+      // Heartbeat timeout.
+      _ = tokio::time::sleep(rand::thread_rng().gen_range(self.config.min_heartbeat_timeout..=self.config.min_heartbeat_timeout*2)) => {
+        info!(self.node_id, "heartbeat timed out");
+
+        self.start_election().await;
+      }
+    }
+  }
+
+  /// Returns the amount of votes needed for the server become a leader
+  /// after an election.
+  ///
+  /// To become a leader, a candidate needs the majority of votes.
+  /// That is, if the cluster has 5 servers, the candidate needs
+  /// to receive 3 votes to become the new leader.
+  fn votes_needed_to_become_leader(&self) -> usize {
+    self.config.servers.len() / 2 + 1
+  }
+
+  /// Makes RPC calls to each node in the cluster asking for a vote.
+  ///
+  /// Returns the number of votes the server got from the other nodes.
+  ///
+  /// Note that it may return before every request is completed if the server
+  /// gets the majority of votes.
+  async fn request_votes_from_peers(&self, votes_needed: usize) -> usize {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.servers.len());
+
+    let handles = self.config.servers.iter().cloned().map(|server| {
+      let tx = tx.clone();
+
+      tokio::spawn(async move {
+        let server = server.clone();
+
+        info!("requesting vote from {}", &server);
+
+        let mut client = raft_client::RaftClient::connect(server.clone())
+          .await
+          .unwrap();
+
+        // TODO: fill RequestVoteRequest with the candidate's info.
+        let response = client
+          .request_vote(RequestVoteRequest {
+            term: 0,
+            candidate_id: 0,
+            last_log_entry_index: 0, // Because candidate has no logs.
+            last_log_entry_term: 0,  // Because candidate has no logs.
+          })
+          .await;
+
+        tx.send(response).await.unwrap();
+      })
+    });
+
+    // We always get at least one vote: our own vote because
+    // we voted for ourselves.
+    let mut votes_received = 1;
+
+    while let Some(result) = rx.recv().await {
+      debug!(?result);
+
+      if let Ok(response) = result {
+        if response.into_inner().vote_granted {
+          votes_received += 1;
+        }
+      }
+
+      if votes_received >= votes_needed {
+        break;
+      }
+    }
+
+    // Cancel RPC calls that have not been completed yet.
+    // Note that there will be RPC calls to cancel only when we
+    // get the majority of votes before every request completes.
+    for handle in handles {
+      handle.abort();
+    }
+
+    votes_received
+  }
+
+  /// After a follower receives no heartbeats for the determined
+  /// heartbeat timeout, it becomes a candidate and initiates an election.
+  async fn start_election(&self) {
+    info!(self.node_id, "starting an election");
+
+    // Transition to candidate state.
+    *self.state.write().await = State::Candidate;
+
+    // Start a new term.
+    *self.current_term.write().await += 1;
+
+    let votes_needed = self.votes_needed_to_become_leader();
+
+    // TODO: don't we need to go back to follower mode if a peer RequestVote response
+    // returns a term that's greater than ours?
+    let votes_received = self.request_votes_from_peers(votes_needed).await;
+
+    // If we got enough votes, transition to leader state.
+    if votes_received >= votes_needed {
+      *self.state.write().await = State::Leader;
+    }
+
+    // TODO: don't forget about election timeout.
   }
 
   /// Returns true if the server decides to vote
