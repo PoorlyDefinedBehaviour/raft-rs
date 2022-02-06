@@ -200,12 +200,47 @@ impl Raft {
       .gen_range(self.config.min_election_timeout..=self.config.min_election_timeout * 2)
   }
 
+  /// Returns true when the server is the cluster leader.
   async fn is_leader(&self) -> bool {
     *self.state.read().await == State::Leader
   }
 
+  /// Returns true when the server is a follower.
+  async fn is_follower(&self) -> bool {
+    *self.state.read().await == State::Follower
+  }
+
   /// The follower state machine.
-  async fn run_follower(&self) {}
+  async fn run_follower(&self) {
+    let mut request_rx = self.request_rx.lock().await;
+
+    while self.is_follower().await {
+      select! {
+        Some(message) = request_rx.recv()=> {
+          match message {
+            Message::AppendEntries{ request, response_tx } => {
+              let response = self.append_entries(request).await;
+              let _ = response_tx.send(response).unwrap();
+            },
+            Message::RequestVote{ request,response_tx } => {
+              let response = self.vote(request).await;
+              let _ = response_tx.send(response).unwrap();
+            }
+            Message::InstallSnapshot { request, response_tx } => {
+              let response = self.install_snapshot(request).await;
+              let _ = response_tx.send(response).unwrap();
+            }
+          }
+        }
+        // Heartbeat timeout.
+        _ = tokio::time::sleep(self.heartbeat_timeout()) => {
+          info!(self.node_id, "heartbeat timed out");
+
+          self.start_election().await;
+        }
+      }
+    }
+  }
 
   /// The candidate state machine.
   async fn run_candidate(&self) {}
@@ -232,12 +267,7 @@ impl Raft {
             }
           }
         }
-        // Heartbeat timeout.
-        _ = tokio::time::sleep(self.heartbeat_timeout()) => {
-          info!(self.node_id, "heartbeat timed out");
 
-          self.start_election().await;
-        }
       }
     }
   }
@@ -320,24 +350,30 @@ impl Raft {
   async fn start_election(&self) {
     info!(self.node_id, "starting an election");
 
-    // Transition to candidate state.
-    *self.state.write().await = State::Candidate;
+    select! {
+      _ = async {
+        // Transition to candidate state.
+        *self.state.write().await = State::Candidate;
 
-    // Start a new term.
-    *self.current_term.write().await += 1;
+        // Start a new term.
+        *self.current_term.write().await += 1;
 
-    let votes_needed = self.votes_needed_to_become_leader();
+        let votes_needed = self.votes_needed_to_become_leader();
 
-    // TODO: don't we need to go back to follower mode if a peer RequestVote response
-    // returns a term that's greater than ours?
-    let votes_received = self.request_votes_from_peers(votes_needed).await;
+        // TODO: don't we need to go back to follower mode if a peer RequestVote response
+        // returns a term that's greater than ours?
+        let votes_received = self.request_votes_from_peers(votes_needed).await;
 
-    // If we got enough votes, transition to leader state.
-    if votes_received >= votes_needed {
-      *self.state.write().await = State::Leader;
-    }
-
-    // TODO: don't forget about election timeout.
+        // If we got enough votes, transition to leader state.
+        if votes_received >= votes_needed {
+          *self.state.write().await = State::Leader;
+        }
+      } => {}
+      _ = tokio::time::sleep(self.election_timeout()) => {
+        info!(self.node_id, "election timed out, going back to follower state");
+        *self.state.write().await = State::Follower;
+      }
+    };
   }
 
   /// Returns true if the server decides to vote
