@@ -34,7 +34,7 @@ impl Default for Config {
   fn default() -> Self {
     Self {
       min_heartbeat_timeout: Duration::from_millis(250),
-      min_election_timeout: Duration::from_millis(rand::thread_rng().gen_range(150..=300)),
+      min_election_timeout: Duration::from_millis(150),
       servers: Vec::new(),
     }
   }
@@ -188,6 +188,22 @@ impl Raft {
     }
   }
 
+  /// Returns a random heartbeat timeout that's between the minimum timeout and the minimum timeout * 2.
+  fn heartbeat_timeout(&self) -> Duration {
+    rand::thread_rng()
+      .gen_range(self.config.min_heartbeat_timeout..=self.config.min_heartbeat_timeout * 2)
+  }
+
+  /// Returns a random election timeout that's between the minimum timeout and the minimum timeout * 2.
+  fn election_timeout(&self) -> Duration {
+    rand::thread_rng()
+      .gen_range(self.config.min_election_timeout..=self.config.min_election_timeout * 2)
+  }
+
+  async fn is_leader(&self) -> bool {
+    *self.state.read().await == State::Leader
+  }
+
   /// The follower state machine.
   async fn run_follower(&self) {}
 
@@ -198,29 +214,30 @@ impl Raft {
   async fn run_leader(&self) {
     let mut request_rx = self.request_rx.lock().await;
 
-    select! {
-      Some(message) = request_rx.recv()=> {
-        match message {
-          Message::AppendEntries{ request, response_tx } => {
-            info!("got AppendEntries request");
-            let response = self.append_entries(request).await;
-            let _ = response_tx.send(response).unwrap();
-          },
-          Message::RequestVote{ request,response_tx } => {
-            let response = self.vote(request).await;
-            let _ = response_tx.send(response).unwrap();
-          }
-          Message::InstallSnapshot { request, response_tx } => {
-            let response = self.install_snapshot(request).await;
-            let _ = response_tx.send(response).unwrap();
+    while self.is_leader().await {
+      select! {
+        Some(message) = request_rx.recv()=> {
+          match message {
+            Message::AppendEntries{ request, response_tx } => {
+              let response = self.append_entries(request).await;
+              let _ = response_tx.send(response).unwrap();
+            },
+            Message::RequestVote{ request,response_tx } => {
+              let response = self.vote(request).await;
+              let _ = response_tx.send(response).unwrap();
+            }
+            Message::InstallSnapshot { request, response_tx } => {
+              let response = self.install_snapshot(request).await;
+              let _ = response_tx.send(response).unwrap();
+            }
           }
         }
-      }
-      // Heartbeat timeout.
-      _ = tokio::time::sleep(rand::thread_rng().gen_range(self.config.min_heartbeat_timeout..=self.config.min_heartbeat_timeout*2)) => {
-        info!(self.node_id, "heartbeat timed out");
+        // Heartbeat timeout.
+        _ = tokio::time::sleep(self.heartbeat_timeout()) => {
+          info!(self.node_id, "heartbeat timed out");
 
-        self.start_election().await;
+          self.start_election().await;
+        }
       }
     }
   }
