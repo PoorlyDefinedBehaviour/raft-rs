@@ -19,15 +19,19 @@ pub struct Config {
   /// becoming a candidate and starting an election.
   /// The actual heartbeat timeout will be a random number between
   /// `min_heartbeat_timeout` and `min_heartbeat_timeout` * 2.
-  min_heartbeat_timeout: Duration,
+  pub min_heartbeat_timeout: Duration,
   /// The minimum amount of time a candidate will wait for an election
   /// to end and for a new leader to be elected before restarting
   /// the election.
   /// The actual election timeout will be a random number between
   /// `min_election_timeout` and `min_election_timeout` * 2.
-  min_election_timeout: Duration,
+  pub min_election_timeout: Duration,
+  /// The amount of time the leader will wait before sending
+  /// an empty AppendEntries requests to the followers to ensure
+  /// that they do not start an election.
+  pub send_heartbeat_timeout: Duration,
   /// The list of the addresses of the servers in the cluster.
-  servers: Vec<String>,
+  pub servers: Vec<String>,
 }
 
 impl Default for Config {
@@ -35,6 +39,7 @@ impl Default for Config {
     Self {
       min_heartbeat_timeout: Duration::from_millis(250),
       min_election_timeout: Duration::from_millis(150),
+      send_heartbeat_timeout: Duration::from_millis(50),
       servers: Vec::new(),
     }
   }
@@ -180,10 +185,21 @@ impl Raft {
     info!(self.node_id, "starting Raft state machine");
 
     loop {
-      match *self.state.read().await {
-        State::Follower => self.run_follower().await,
-        State::Candidate => self.run_candidate().await,
-        State::Leader => self.run_leader().await,
+      let state = self.state.read().await;
+      info!("current state: {:?}", *state);
+      match *state {
+        State::Follower => {
+          drop(state);
+          self.run_follower().await;
+        }
+        State::Candidate => {
+          drop(state);
+          self.run_candidate().await;
+        }
+        State::Leader => {
+          drop(state);
+          self.run_leader().await;
+        }
       }
     }
   }
@@ -217,11 +233,17 @@ impl Raft {
 
   /// The follower state machine.
   async fn run_follower(&self) {
+    info!("running follower fsm");
+
     let mut request_rx = self.request_rx.lock().await;
 
-    while self.is_follower().await {
+    loop {
+      if !self.is_follower().await {
+        return;
+      }
+
       select! {
-        Some(message) = request_rx.recv()=> {
+        Some(message) = request_rx.recv() => {
           match message {
             Message::AppendEntries{ request, response_tx } => {
               let response = self.append_entries(request).await;
@@ -237,8 +259,8 @@ impl Raft {
             }
           }
         }
-        // Heartbeat timeout.
-        _ = tokio::time::sleep(self.heartbeat_timeout()) => {
+         // Heartbeat timeout.
+         _ = tokio::time::sleep(self.heartbeat_timeout()) => {
           info!(self.node_id, "heartbeat timed out, becoming a candidate");
 
           // Become a candidate because we will start an election to become the leader.
@@ -250,9 +272,16 @@ impl Raft {
 
   /// The candidate state machine.
   async fn run_candidate(&self) {
+    info!(self.node_id, "running candidate fsm");
+
     let mut request_rx = self.request_rx.lock().await;
 
-    while self.is_candidate().await {
+    loop {
+      if !self.is_candidate().await {
+        info!("not candidate, exiting candidate fsm");
+        return;
+      }
+
       select! {
         // Start an election to try to become the leader.
         _ = self.start_election() => {}
@@ -278,6 +307,8 @@ impl Raft {
 
   /// The leader state machine.
   async fn run_leader(&self) {
+    info!(self.node_id, "running leader fsm");
+
     let mut request_rx = self.request_rx.lock().await;
 
     while self.is_leader().await {
@@ -298,7 +329,68 @@ impl Raft {
             }
           }
         }
+        _ = tokio::time::sleep(self.heartbeat_timeout()) => {
+          info!(self.node_id, "sending heartbeat to followers");
+
+          self.send_heartbeat_to_followers().await;
+        }
       }
+    }
+  }
+
+  /// Sends an empty AppendEntries request to follower to assert
+  /// our leadership.
+  ///
+  /// Becomes a follower if any of the follower has a term that's
+  /// greater than the term we have.
+  async fn send_heartbeat_to_followers(&self) {
+    info!(
+      "sending heartbeat to {} followers",
+      self.config.servers.len()
+    );
+
+    if self.config.servers.is_empty() {
+      return;
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.servers.len());
+
+    let handles = self.config.servers.iter().cloned().map(|server| {
+      let tx = tx.clone();
+
+      tokio::spawn(async move {
+        let server = server.clone();
+
+        info!("sending heartbeat to {}", &server);
+
+        let mut client = raft_client::RaftClient::connect(server.clone())
+          .await
+          .unwrap();
+
+        // TODO: fill RequestVoteRequest with the candidate's info.
+        let response = client
+          .append_entries(AppendEntriesRequest {
+            // TODO: replace me with the leader data
+            ..Default::default()
+          })
+          .await;
+
+        tx.send(response).await.unwrap();
+      })
+    });
+
+    while let Some(result) = rx.recv().await {
+      debug!(?result);
+
+      if let Ok(response) = result {
+        // TODO: compare response term to our own
+        break;
+      }
+    }
+
+    // Cancel RPC calls that have not been completed yet.
+    for handle in handles {
+      handle.abort();
     }
   }
 
@@ -319,6 +411,20 @@ impl Raft {
   /// Note that it may return before every request is completed if the server
   /// gets the majority of votes.
   async fn request_votes_from_peers(&self, votes_needed: usize) -> usize {
+    // We always get at least one vote:
+    // our own vote because we voted for ourselves.
+    let mut votes_received = 1;
+
+    if self.config.servers.is_empty() {
+      info!("single node. not requesting vote from peers");
+      return votes_received;
+    }
+
+    info!(
+      "sending RequestVote requests to {} peers",
+      self.config.servers.len()
+    );
+
     let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.servers.len());
 
     let handles = self.config.servers.iter().cloned().map(|server| {
@@ -346,10 +452,6 @@ impl Raft {
         tx.send(response).await.unwrap();
       })
     });
-
-    // We always get at least one vote:
-    // our own vote because we voted for ourselves.
-    let mut votes_received = 1;
 
     while let Some(result) = rx.recv().await {
       debug!(?result);
@@ -389,7 +491,9 @@ impl Raft {
   /// After a follower receives no heartbeats for the determined
   /// heartbeat timeout, it becomes a candidate and initiates an election.
   async fn start_election(&self) {
-    info!(self.node_id, "starting an election");
+    let election_timeout = self.election_timeout();
+
+    info!(self.node_id, ?election_timeout, "starting an election");
 
     select! {
       _ = async {
@@ -405,12 +509,15 @@ impl Raft {
         // returns a term that's greater than ours?
         let votes_received = self.request_votes_from_peers(votes_needed).await;
 
+        info!("need {} votes, received {}", votes_needed, votes_received);
+
         // If we got enough votes, transition to leader state.
         if votes_received >= votes_needed {
+          info!("got enough votes, becoming leader");
           *self.state.write().await = State::Leader;
         }
       } => {}
-      _ = tokio::time::sleep(self.election_timeout()) => {
+      _ = tokio::time::sleep(election_timeout) => {
         info!(self.node_id, "election timed out, going back to follower state");
         *self.state.write().await = State::Follower;
       }
