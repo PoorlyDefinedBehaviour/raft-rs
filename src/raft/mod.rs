@@ -210,6 +210,11 @@ impl Raft {
     *self.state.read().await == State::Follower
   }
 
+  /// Returns true when the server is a candidate.
+  async fn is_candidate(&self) -> bool {
+    *self.state.read().await == State::Candidate
+  }
+
   /// The follower state machine.
   async fn run_follower(&self) {
     let mut request_rx = self.request_rx.lock().await;
@@ -234,16 +239,42 @@ impl Raft {
         }
         // Heartbeat timeout.
         _ = tokio::time::sleep(self.heartbeat_timeout()) => {
-          info!(self.node_id, "heartbeat timed out");
+          info!(self.node_id, "heartbeat timed out, becoming a candidate");
 
-          self.start_election().await;
+          // Become a candidate because we will start an election to become the leader.
+          *self.state.write().await = State::Candidate;
         }
       }
     }
   }
 
   /// The candidate state machine.
-  async fn run_candidate(&self) {}
+  async fn run_candidate(&self) {
+    let mut request_rx = self.request_rx.lock().await;
+
+    while self.is_candidate().await {
+      select! {
+        // Start an election to try to become the leader.
+        _ = self.start_election() => {}
+        Some(message) = request_rx.recv()=> {
+          match message {
+            Message::AppendEntries{ request, response_tx } => {
+              let response = self.append_entries(request).await;
+              let _ = response_tx.send(response).unwrap();
+            },
+            Message::RequestVote{ request,response_tx } => {
+              let response = self.vote(request).await;
+              let _ = response_tx.send(response).unwrap();
+            }
+            Message::InstallSnapshot { request, response_tx } => {
+              let response = self.install_snapshot(request).await;
+              let _ = response_tx.send(response).unwrap();
+            }
+          }
+        }
+      }
+    }
+  }
 
   /// The leader state machine.
   async fn run_leader(&self) {
@@ -267,7 +298,6 @@ impl Raft {
             }
           }
         }
-
       }
     }
   }
@@ -317,8 +347,8 @@ impl Raft {
       })
     });
 
-    // We always get at least one vote: our own vote because
-    // we voted for ourselves.
+    // We always get at least one vote:
+    // our own vote because we voted for ourselves.
     let mut votes_received = 1;
 
     while let Some(result) = rx.recv().await {
@@ -345,6 +375,17 @@ impl Raft {
     votes_received
   }
 
+  /// Starts a new term by increment the current term by 1.
+  ///
+  /// Sets voted_for to None because the server has not voted
+  /// in the new term yet.
+  async fn start_new_term(&self) {
+    // TODO: this is bad, locking two things at different times.
+    // We should unify the mutable state.
+    *self.current_term.write().await += 1;
+    *self.voted_for.lock().await = None;
+  }
+
   /// After a follower receives no heartbeats for the determined
   /// heartbeat timeout, it becomes a candidate and initiates an election.
   async fn start_election(&self) {
@@ -356,7 +397,7 @@ impl Raft {
         *self.state.write().await = State::Candidate;
 
         // Start a new term.
-        *self.current_term.write().await += 1;
+        self.start_new_term().await;
 
         let votes_needed = self.votes_needed_to_become_leader();
 
