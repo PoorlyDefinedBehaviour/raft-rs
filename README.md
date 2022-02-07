@@ -341,4 +341,5 @@ In Search of an Understandable Consensus Algorithm
 (Extended Version) - https://raft.github.io/raft.pdf  
 Designing for Understandability: The Raft Consensus Algorithm - https://www.youtube.com/watch?v=vYp4LYbnnW8
 "Raft - The Understandable Distributed Protocol" by Ben Johnson (2013) - https://www.youtube.com/watch?v=ro2fU8_mr2w  
-https://github.com/hashicorp/raft
+https://github.com/hashicorp/raft  
+MIT 6.824: Distributed Systems (Spring 2020) Lecture 6: Fault Tolerance: Raft - https://www.youtube.com/watch?v=64Zp3tzNbpE&list=PLrw6a1wE39_tb2fErI4-WkMbsvGQk9_UB&index=6
