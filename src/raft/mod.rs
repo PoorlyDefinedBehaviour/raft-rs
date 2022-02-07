@@ -4,9 +4,10 @@ use rand::Rng;
 use tokio::{
   select,
   sync::{Mutex, RwLock},
+  task::JoinHandle,
 };
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, instrument};
+use tracing::{error, info, instrument};
 
 // Include Rust files generated in build.rs
 tonic::include_proto!("raft.v1");
@@ -186,7 +187,7 @@ impl Raft {
 
     loop {
       let state = self.state.read().await;
-      info!("current state: {:?}", *state);
+      info!(self.node_id, "current state: {:?}", *state);
       match *state {
         State::Follower => {
           drop(state);
@@ -233,7 +234,7 @@ impl Raft {
 
   /// The follower state machine.
   async fn run_follower(&self) {
-    info!("running follower fsm");
+    info!(self.node_id, "running follower fsm");
 
     let mut request_rx = self.request_rx.lock().await;
 
@@ -250,6 +251,7 @@ impl Raft {
               let _ = response_tx.send(response).unwrap();
             },
             Message::RequestVote{ request,response_tx } => {
+              info!(self.node_id, ?request, "got RequestVote");
               let response = self.vote(request).await;
               let _ = response_tx.send(response).unwrap();
             }
@@ -259,8 +261,11 @@ impl Raft {
             }
           }
         }
-         // Heartbeat timeout.
-         _ = tokio::time::sleep(self.heartbeat_timeout()) => {
+        _ = {
+          let heartbeat_timeout = self.heartbeat_timeout();
+          info!(self.node_id, ?heartbeat_timeout, "setting heartbeat timeout");
+          tokio::time::sleep(heartbeat_timeout)
+        } => {
           info!(self.node_id, "heartbeat timed out, becoming a candidate");
 
           // Become a candidate because we will start an election to become the leader.
@@ -278,7 +283,6 @@ impl Raft {
 
     loop {
       if !self.is_candidate().await {
-        info!("not candidate, exiting candidate fsm");
         return;
       }
 
@@ -329,7 +333,7 @@ impl Raft {
             }
           }
         }
-        _ = tokio::time::sleep(self.heartbeat_timeout()) => {
+        _ = tokio::time::sleep(self.config.send_heartbeat_timeout) => {
           info!(self.node_id, "sending heartbeat to followers");
 
           self.send_heartbeat_to_followers().await;
@@ -345,6 +349,7 @@ impl Raft {
   /// greater than the term we have.
   async fn send_heartbeat_to_followers(&self) {
     info!(
+      self.node_id,
       "sending heartbeat to {} followers",
       self.config.servers.len()
     );
@@ -355,36 +360,56 @@ impl Raft {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.servers.len());
 
-    let handles = self.config.servers.iter().cloned().map(|server| {
-      let tx = tx.clone();
+    let (previous_log_term, previous_log_index) = {
+      let logs = self.logs.read().await;
+      (logs.last().map(|entry| entry.term).unwrap_or(0), logs.len())
+    };
 
-      tokio::spawn(async move {
+    let current_term = *self.current_term.read().await;
+    let node_id = self.node_id;
+    let last_applied_index = self.last_applied_index;
+
+    let handles: Vec<JoinHandle<()>> = self
+      .config
+      .servers
+      .iter()
+      .cloned()
+      .map(|server| {
+        let tx = tx.clone();
+
         let server = server.clone();
 
-        info!("sending heartbeat to {}", &server);
+        tokio::spawn(async move {
+          info!(node_id, "sending heartbeat to {}", &server);
 
-        let mut client = raft_client::RaftClient::connect(server.clone())
-          .await
-          .unwrap();
+          // TODO: reconnecting every time = bad
+          let mut client = raft_client::RaftClient::connect(server).await.unwrap();
 
-        // TODO: fill RequestVoteRequest with the candidate's info.
-        let response = client
-          .append_entries(AppendEntriesRequest {
-            // TODO: replace me with the leader data
-            ..Default::default()
-          })
-          .await;
+          let response = client
+            .append_entries(AppendEntriesRequest {
+              leader_term: current_term,
+              leader_id: node_id,
+              previous_log_index: previous_log_index as u64,
+              previous_log_term,
+              entries: vec![],
+              leader_commit_index: last_applied_index,
+            })
+            .await;
 
-        tx.send(response).await.unwrap();
+          tx.send(response).await.unwrap();
+        })
       })
-    });
+      .collect();
 
-    while let Some(result) = rx.recv().await {
-      debug!(?result);
+    // Receive from the response channel one time for each peer.
+    for _ in 0..self.config.servers.len() {
+      match rx.recv().await {
+        None => unreachable!(),
+        Some(Err(e)) => error!(error = ?e, "peer RequestVote returned error"),
+        Some(Ok(response)) => {
 
-      if let Ok(response) = result {
-        // TODO: compare response term to our own
-        break;
+          // TODO: compare response term to our own
+        }
       }
     }
 
@@ -414,56 +439,72 @@ impl Raft {
     // We always get at least one vote:
     // our own vote because we voted for ourselves.
     let mut votes_received = 1;
+    // TODO: update `self.voted_for`.
 
     if self.config.servers.is_empty() {
-      info!("single node. not requesting vote from peers");
+      info!(self.node_id, "single node. not requesting vote from peers");
       return votes_received;
     }
 
     info!(
-      "sending RequestVote requests to {} peers",
-      self.config.servers.len()
+      peers =?self.config.servers,
+      "sending RequestVote requests to peers",
     );
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.servers.len());
 
-    let handles = self.config.servers.iter().cloned().map(|server| {
-      let tx = tx.clone();
+    let term = *self.current_term.read().await;
+    let candidate_id = self.node_id;
+    let (last_log_entry_term, last_log_entry_index) = {
+      let logs = self.logs.read().await;
+      (
+        logs.last().map(|entry| entry.term).unwrap_or(0),
+        (logs.len()) as u64,
+      )
+    };
 
-      tokio::spawn(async move {
-        let server = server.clone();
+    let handles: Vec<JoinHandle<()>> = self
+      .config
+      .servers
+      .iter()
+      .cloned()
+      .map(|peer| {
+        let tx = tx.clone();
 
-        info!("requesting vote from {}", &server);
+        tokio::spawn(async move {
+          info!(node_id = candidate_id, "requesting vote from {}", &peer);
 
-        let mut client = raft_client::RaftClient::connect(server.clone())
-          .await
-          .unwrap();
+          let mut client = raft_client::RaftClient::connect(peer.clone())
+            .await
+            .unwrap();
 
-        // TODO: fill RequestVoteRequest with the candidate's info.
-        let response = client
-          .request_vote(RequestVoteRequest {
-            term: 0,
-            candidate_id: 0,
-            last_log_entry_index: 0, // Because candidate has no logs.
-            last_log_entry_term: 0,  // Because candidate has no logs.
-          })
-          .await;
+          let response = client
+            .request_vote(RequestVoteRequest {
+              term,
+              candidate_id,
+              last_log_entry_index,
+              last_log_entry_term,
+            })
+            .await;
 
-        tx.send(response).await.unwrap();
+          tx.send(response).await.unwrap();
+        })
       })
-    });
+      .collect();
 
-    while let Some(result) = rx.recv().await {
-      debug!(?result);
+    // Receive from the response channel one time for each peer.
+    for _ in 0..self.config.servers.len() {
+      match rx.recv().await.unwrap() {
+        Err(e) => error!(error = ?e, "peer RequestVote returned error"),
+        Ok(response) => {
+          if response.into_inner().vote_granted {
+            votes_received += 1;
+          }
 
-      if let Ok(response) = result {
-        if response.into_inner().vote_granted {
-          votes_received += 1;
+          if votes_received >= votes_needed {
+            break;
+          }
         }
-      }
-
-      if votes_received >= votes_needed {
-        break;
       }
     }
 
@@ -509,11 +550,11 @@ impl Raft {
         // returns a term that's greater than ours?
         let votes_received = self.request_votes_from_peers(votes_needed).await;
 
-        info!("need {} votes, received {}", votes_needed, votes_received);
+        info!(self.node_id, "need {} votes, received {}", votes_needed, votes_received);
 
         // If we got enough votes, transition to leader state.
         if votes_received >= votes_needed {
-          info!("got enough votes, becoming leader");
+          info!(self.node_id, "got enough votes, becoming leader");
           *self.state.write().await = State::Leader;
         }
       } => {}
@@ -698,7 +739,7 @@ impl Raft {
     if request.previous_log_index > 0 {
       match logs.get(request.previous_log_index as usize) {
         None => {
-          info!("request denied: no log at index");
+          info!(self.node_id, "request denied: no log at index");
 
           return AppendEntriesResponse {
             term: *current_term,
