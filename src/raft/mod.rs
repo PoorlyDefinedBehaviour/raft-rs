@@ -7,7 +7,7 @@ use tokio::{
   task::JoinHandle,
 };
 use tonic::{Request, Response, Status};
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, Instrument};
 
 // Include Rust files generated in build.rs
 tonic::include_proto!("raft.v1");
@@ -150,12 +150,14 @@ impl Raft {
   pub fn new(config: Config) -> Arc<Self> {
     let (request_tx, request_rx) = tokio::sync::mpsc::channel(1024);
 
+    let node_id = rand::thread_rng().gen();
+
     // TODO: handle boot from state persisted to persitent storage.
     let raft = Arc::new(Self {
       config,
       // TODO: is it ok for the node id to be random?
       // should we use uuids here?
-      node_id: rand::thread_rng().gen(),
+      node_id,
       state: RwLock::new(State::Follower),
       current_term: RwLock::new(0),
       voted_for: Mutex::new(None),
@@ -172,7 +174,12 @@ impl Raft {
 
     let raft_arc_clone = Arc::clone(&raft);
 
-    tokio::spawn(async move { raft_arc_clone.run().await });
+    tokio::spawn(async move {
+      raft_arc_clone
+        .run()
+        .instrument(tracing::info_span!("Raft", node_id))
+        .await
+    });
 
     raft
   }
