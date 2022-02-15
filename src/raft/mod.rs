@@ -146,7 +146,7 @@ enum State {
 }
 
 impl Raft {
-  #[instrument]
+  #[instrument(skip_all)]
   pub fn new(config: Config) -> Arc<Self> {
     let (request_tx, request_rx) = tokio::sync::mpsc::channel(1024);
 
@@ -190,11 +190,11 @@ impl Raft {
   /// on the current state.
   #[instrument(skip_all)]
   async fn run(self: Arc<Self>) {
-    info!(self.node_id, "starting Raft state machine");
+    info!("starting Raft state machine");
 
     loop {
       let state = self.state.read().await;
-      info!(self.node_id, "current state: {:?}", *state);
+      info!("current state: {:?}", *state);
       match *state {
         State::Follower => {
           drop(state);
@@ -213,35 +213,49 @@ impl Raft {
   }
 
   /// Returns a random heartbeat timeout that's between the minimum timeout and the minimum timeout * 2.
+
   fn heartbeat_timeout(&self) -> Duration {
-    rand::thread_rng()
-      .gen_range(self.config.min_heartbeat_timeout..=self.config.min_heartbeat_timeout * 2)
+    let timeout = rand::thread_rng()
+      .gen_range(self.config.min_heartbeat_timeout..=self.config.min_heartbeat_timeout * 2);
+
+    info!(heartbeat_timeout = ?timeout);
+
+    timeout
   }
 
   /// Returns a random election timeout that's between the minimum timeout and the minimum timeout * 2.
+  #[instrument(skip_all)]
   fn election_timeout(&self) -> Duration {
-    rand::thread_rng()
-      .gen_range(self.config.min_election_timeout..=self.config.min_election_timeout * 2)
+    let timeout = rand::thread_rng()
+      .gen_range(self.config.min_election_timeout..=self.config.min_election_timeout * 2);
+
+    info!(election_timeout = ?timeout);
+
+    timeout
   }
 
   /// Returns true when the server is the cluster leader.
+  #[instrument(skip_all)]
   async fn is_leader(&self) -> bool {
     *self.state.read().await == State::Leader
   }
 
   /// Returns true when the server is a follower.
+  #[instrument(skip_all)]
   async fn is_follower(&self) -> bool {
     *self.state.read().await == State::Follower
   }
 
   /// Returns true when the server is a candidate.
+  #[instrument(skip_all)]
   async fn is_candidate(&self) -> bool {
     *self.state.read().await == State::Candidate
   }
 
   /// The follower state machine.
+  #[instrument(skip_all)]
   async fn run_follower(&self) {
-    info!(self.node_id, "running follower fsm");
+    info!("running follower fsm");
 
     let mut request_rx = self.request_rx.lock().await;
 
@@ -258,7 +272,7 @@ impl Raft {
               let _ = response_tx.send(response).unwrap();
             },
             Message::RequestVote{ request,response_tx } => {
-              info!(self.node_id, ?request, "got RequestVote");
+              info!( ?request, "got RequestVote");
               let response = self.vote(request).await;
               let _ = response_tx.send(response).unwrap();
             }
@@ -270,10 +284,10 @@ impl Raft {
         }
         _ = {
           let heartbeat_timeout = self.heartbeat_timeout();
-          info!(self.node_id, ?heartbeat_timeout, "setting heartbeat timeout");
+          info!( ?heartbeat_timeout, "setting heartbeat timeout");
           tokio::time::sleep(heartbeat_timeout)
         } => {
-          info!(self.node_id, "heartbeat timed out, becoming a candidate");
+          info!( "heartbeat timed out, becoming a candidate");
 
           // Become a candidate because we will start an election to become the leader.
           *self.state.write().await = State::Candidate;
@@ -283,8 +297,9 @@ impl Raft {
   }
 
   /// The candidate state machine.
+  #[instrument(skip_all)]
   async fn run_candidate(&self) {
-    info!(self.node_id, "running candidate fsm");
+    info!("running candidate fsm");
 
     let mut request_rx = self.request_rx.lock().await;
 
@@ -317,8 +332,9 @@ impl Raft {
   }
 
   /// The leader state machine.
+  #[instrument(skip_all)]
   async fn run_leader(&self) {
-    info!(self.node_id, "running leader fsm");
+    info!("running leader fsm");
 
     let mut request_rx = self.request_rx.lock().await;
 
@@ -341,7 +357,7 @@ impl Raft {
           }
         }
         _ = tokio::time::sleep(self.config.send_heartbeat_timeout) => {
-          info!(self.node_id, "sending heartbeat to followers");
+          info!( "sending heartbeat to followers");
 
           self.send_heartbeat_to_followers().await;
         }
@@ -354,9 +370,9 @@ impl Raft {
   ///
   /// Becomes a follower if any of the follower has a term that's
   /// greater than the term we have.
+  #[instrument(skip_all)]
   async fn send_heartbeat_to_followers(&self) {
     info!(
-      self.node_id,
       "sending heartbeat to {} followers",
       self.config.servers.len()
     );
@@ -432,8 +448,14 @@ impl Raft {
   /// To become a leader, a candidate needs the majority of votes.
   /// That is, if the cluster has 5 servers, the candidate needs
   /// to receive 3 votes to become the new leader.
+  #[instrument(
+    name = "Getting number of votes needed to become the leader",
+    skip_all,
+    fields(votes)
+  )]
   fn votes_needed_to_become_leader(&self) -> usize {
-    self.config.servers.len() / 2 + 1
+    let votes = self.config.servers.len() / 2 + 1;
+    votes
   }
 
   /// Makes RPC calls to each node in the cluster asking for a vote.
@@ -442,6 +464,7 @@ impl Raft {
   ///
   /// Note that it may return before every request is completed if the server
   /// gets the majority of votes.
+  #[instrument(name = "Requesting vote from peers", skip_all, fields(votes_needed, votes_received, peers = ?self.config.servers))]
   async fn request_votes_from_peers(&self, votes_needed: usize) -> usize {
     // We always get at least one vote:
     // our own vote because we voted for ourselves.
@@ -449,14 +472,9 @@ impl Raft {
     // TODO: update `self.voted_for`.
 
     if self.config.servers.is_empty() {
-      info!(self.node_id, "single node. not requesting vote from peers");
+      info!("single node. not requesting vote from peers");
       return votes_received;
     }
-
-    info!(
-      peers =?self.config.servers,
-      "sending RequestVote requests to peers",
-    );
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(self.config.servers.len());
 
@@ -479,7 +497,7 @@ impl Raft {
         let tx = tx.clone();
 
         tokio::spawn(async move {
-          info!(node_id = candidate_id, "requesting vote from {}", &peer);
+          info!(?peer, "requesting vote from");
 
           let mut client = raft_client::RaftClient::connect(peer.clone())
             .await
@@ -529,19 +547,26 @@ impl Raft {
   ///
   /// Sets voted_for to None because the server has not voted
   /// in the new term yet.
+  #[instrument(name = "Starting a new term", skip_all, fields(old_term, new_term))]
   async fn start_new_term(&self) {
     // TODO: this is bad, locking two things at different times.
     // We should unify the mutable state.
-    *self.current_term.write().await += 1;
+
+    let mut term = self.current_term.write().await;
+
+    let old_term = *term;
+    let new_term = old_term + 1;
+
+    *term = new_term;
+
     *self.voted_for.lock().await = None;
   }
 
   /// After a follower receives no heartbeats for the determined
   /// heartbeat timeout, it becomes a candidate and initiates an election.
+  #[instrument(name = "Starting an election", skip_all, fields(election_timeout))]
   async fn start_election(&self) {
     let election_timeout = self.election_timeout();
-
-    info!(self.node_id, ?election_timeout, "starting an election");
 
     select! {
       _ = async {
@@ -557,16 +582,16 @@ impl Raft {
         // returns a term that's greater than ours?
         let votes_received = self.request_votes_from_peers(votes_needed).await;
 
-        info!(self.node_id, "need {} votes, received {}", votes_needed, votes_received);
+
 
         // If we got enough votes, transition to leader state.
         if votes_received >= votes_needed {
-          info!(self.node_id, "got enough votes, becoming leader");
+          info!( "got enough votes, becoming leader");
           *self.state.write().await = State::Leader;
         }
       } => {}
       _ = tokio::time::sleep(election_timeout) => {
-        info!(self.node_id, "election timed out, going back to follower state");
+        info!( "election timed out, going back to follower state");
         *self.state.write().await = State::Follower;
       }
     };
@@ -574,6 +599,11 @@ impl Raft {
 
   /// Returns true if the server decides to vote
   /// for the candidate to be the new cluster leader.
+  #[instrument(
+    name = "Voting for candidate",
+    skip_all,
+    fields(candidate, current_term)
+  )]
   async fn vote(&self, candidate: RequestVoteRequest) -> RequestVoteResponse {
     let mut current_term = self.current_term.write().await;
 
@@ -702,6 +732,11 @@ impl Raft {
   /// Conflicting entries are deleted from the server log.
   /// An entry is considered to be conflicting with another entry
   /// if it has the same index as a new entry but a different term.
+  #[instrument(
+    name = "Handling AppendEntries request",
+    skip_all,
+    fields(current_term, request)
+  )]
   async fn append_entries(&self, mut request: AppendEntriesRequest) -> AppendEntriesResponse {
     let mut current_term = self.current_term.write().await;
 
@@ -746,7 +781,7 @@ impl Raft {
     if request.previous_log_index > 0 {
       match logs.get(request.previous_log_index as usize) {
         None => {
-          info!(self.node_id, "request denied: no log at index");
+          info!("request denied: no log at index");
 
           return AppendEntriesResponse {
             term: *current_term,
@@ -795,6 +830,11 @@ impl Raft {
   }
 
   /// Updates follower logs based on a snapshot from the cluster leader.
+  #[instrument(
+    name = "Handling InstallSnapshot request",
+    skip_all,
+    fields(current_term, request)
+  )]
   pub async fn install_snapshot(&self, request: InstallSnapshotRequest) -> InstallSnapshotResponse {
     let mut current_term = self.current_term.write().await;
 
@@ -839,6 +879,7 @@ impl Raft {
 
 #[tonic::async_trait]
 impl raft_server::Raft for Arc<Raft> {
+  #[instrument(name = "RequestVote request received", skip_all, fields(request))]
   async fn request_vote(
     &self,
     request: Request<RequestVoteRequest>,
@@ -862,6 +903,7 @@ impl raft_server::Raft for Arc<Raft> {
     Ok(Response::new(rx.await.unwrap()))
   }
 
+  #[instrument(name = "AppendEntires request received", skip_all, fields(request))]
   async fn append_entries(
     &self,
     request: Request<AppendEntriesRequest>,
@@ -885,6 +927,7 @@ impl raft_server::Raft for Arc<Raft> {
     Ok(Response::new(rx.await.unwrap()))
   }
 
+  #[instrument(name = "InstallSnapshot request received", skip_all, fields(request))]
   async fn install_snapshot(
     &self,
     request: Request<InstallSnapshotRequest>,
